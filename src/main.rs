@@ -55,20 +55,58 @@ struct Pos {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct Span<T> {
-    item: T,
+struct Span {
     start: Pos,
     end: Pos,
 }
 
-impl<T> std::ops::Index<Span<T>> for str {
-    type Output = str;
-    fn index(&self, index: Span<T>) -> &Self::Output {
-        &self[index.start.col as usize..index.end.col as usize]
+impl std::ops::Add for Span {
+    type Output = Span;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            start: self.start,
+            end: rhs.end,
+        }
+    }
+}
+
+impl std::ops::Add<Pos> for Span {
+    type Output = Span;
+    fn add(self, rhs: Pos) -> Self::Output {
+        Self {
+            start: self.start,
+            end: rhs,
+        }
+    }
+}
+
+impl std::ops::AddAssign<Span> for Span {
+    fn add_assign(&mut self, rhs: Span) {
+        self.end = rhs.end
     }
 }
 
 #[derive(Debug, Copy, Clone)]
+struct Spanned<T> {
+    item: T,
+    span: Span,
+}
+
+impl<T> std::ops::Index<Spanned<T>> for str {
+    type Output = str;
+    fn index(&self, index: Spanned<T>) -> &Self::Output {
+        &self[index.span]
+    }
+}
+
+impl std::ops::Index<Span> for str {
+    type Output = str;
+    fn index(&self, index: Span) -> &Self::Output {
+        &self[index.start.col as usize..index.end.col as usize]
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
 enum Token {
     LeftParen,
     RightParen,
@@ -116,7 +154,7 @@ enum Token {
     Eof,
 }
 
-fn lex(source: &str) -> impl Iterator<Item = Span<Token>> + '_ {
+fn lex(source: &str) -> impl Iterator<Item = Spanned<Token>> + '_ {
     let mut lexer = Lexer::new(source);
     std::iter::from_fn(move || match lexer.lex() {
         d if matches!(d.item, Token::Eof) => None,
@@ -141,7 +179,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex(&mut self) -> Span<Token> {
+    fn lex(&mut self) -> Spanned<Token> {
         use Token::*;
         self.consume_while(char::is_whitespace);
 
@@ -182,7 +220,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_keyword(&mut self, start: Pos) -> Span<Token> {
+    fn lex_keyword(&mut self, start: Pos) -> Spanned<Token> {
         use Token::*;
         const KEYWORDS: &[(&str, Token)] = &[
             ("and", And),
@@ -212,7 +250,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_number(&mut self, start: Pos) -> Span<Token> {
+    fn lex_number(&mut self, start: Pos) -> Spanned<Token> {
         while let Some(p) = self.peek() {
             if !Self::is_digit(p) && p != '.' {
                 break;
@@ -222,7 +260,7 @@ impl<'a> Lexer<'a> {
         self.emit(start, Token::Number)
     }
 
-    fn lex_string(&mut self, start: Pos) -> Span<Token> {
+    fn lex_string(&mut self, start: Pos) -> Spanned<Token> {
         self.consume_while(|ch| ch != '"');
         self.consume();
         self.emit(start, Token::String)
@@ -234,7 +272,7 @@ impl<'a> Lexer<'a> {
         left: Token,
         right: Token,
         cmp: impl Fn(char) -> bool,
-    ) -> Span<Token> {
+    ) -> Spanned<Token> {
         if cmp(self.peek().expect("not EOF")) {
             self.consume();
             self.emit(start, right)
@@ -243,11 +281,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn emit(&mut self, start: Pos, item: Token) -> Span<Token> {
-        Span {
+    fn emit(&mut self, start: Pos, item: Token) -> Spanned<Token> {
+        Spanned {
             item,
-            start,
-            end: self.current,
+            span: Span {
+                start,
+                end: self.current,
+            },
         }
     }
 
