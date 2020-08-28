@@ -1,4 +1,4 @@
-// #![cfg_attr(debug_assertions, allow(dead_code, unused_variables))]
+#![cfg_attr(debug_assertions, allow(dead_code, unused_variables))]
 
 #[macro_use]
 #[allow(dead_code)]
@@ -10,12 +10,15 @@ pub mod span;
 pub mod token;
 
 mod ast;
-
-#[allow(dead_code)]
 mod parser;
-
-mod logger;
-
-#[allow(unused_variables)]
 mod printer;
 mod visit;
+
+#[allow(dead_code)]
+mod logger;
+
+// macro_rules! pos {
+//     () => {
+//         concat!(file!(), ":", line!(), ":", column!())
+//     };
+// }

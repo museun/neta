@@ -1,5 +1,5 @@
 use crate::{
-    span::{Span, Spanned},
+    span::Spanned,
     token::Token,
     visit::{Accept, Visitor},
 };
@@ -42,7 +42,7 @@ pub enum StmtTy {
     Function {
         ident: Identifier,
         params: Vec<Identifier>,
-        block: Vec<Stmt>,
+        block: Spanned<Vec<Stmt>>,
     },
 
     Conditional {
@@ -155,17 +155,18 @@ pub enum BinaryOp {
 
 impl BinaryOp {
     pub(super) fn from_token(tok: Token) -> Self {
+        use Token::*;
         match tok {
-            Token::Minus => Self::Minus,
-            Token::Plus => Self::Plus,
-            Token::Slash => Self::Slash,
-            Token::Star => Self::Star,
-            Token::EqualEqual => Self::Eq,
-            Token::BangEqual => Self::NotEq,
-            Token::Less => Self::Less,
-            Token::LessEqual => Self::LessEq,
-            Token::Greater => Self::Greater,
-            Token::GreaterEqual => Self::GreaterEq,
+            Minus => Self::Minus,
+            Plus => Self::Plus,
+            Slash => Self::Slash,
+            Star => Self::Star,
+            EqualEqual => Self::Eq,
+            BangEqual => Self::NotEq,
+            Less => Self::Less,
+            LessEqual => Self::LessEq,
+            Greater => Self::Greater,
+            GreaterEqual => Self::GreaterEq,
             _ => unreachable!(),
         }
     }
@@ -177,19 +178,28 @@ pub enum LogicalOp {
     And,
 }
 
-impl<T> Accept<T> for Program
-where
-    T: std::fmt::Debug,
-{
-    fn accept(&self, _visit: &mut dyn Visitor<T>) -> T {
-        unimplemented!()
+impl<'a> Accept<()> for crate::visit::Spanned<'a, Program> {
+    fn accept(&self, visit: &mut dyn Visitor<()>) {
+        self.item
+            .stmts
+            .iter()
+            .for_each(|s| Spanned::as_ref(s).accept(visit))
     }
+}
 
-    fn accept_many(&self, visit: &mut dyn Visitor<T>) -> Vec<T> {
-        self.stmts
+impl<'a> Accept<String> for crate::visit::Spanned<'a, Program> {
+    fn accept(&self, visit: &mut dyn Visitor<String>) -> String {
+        self.item
+            .stmts
             .iter()
             .map(|s| Spanned::as_ref(s).accept(visit))
-            .collect()
+            .fold(String::new(), |mut a, c| {
+                if !a.is_empty() {
+                    a.push('\n');
+                }
+                a.push_str(&c);
+                a
+            })
     }
 }
 
@@ -220,7 +230,10 @@ impl<'a, T> Accept<T> for crate::visit::Spanned<'a, ExprTy> {
 
             ExprTy::Grouping { expr } => visit.visit_expr_grouping(Spanned::as_ref(expr)),
 
-            ExprTy::Literal { lit } => visit.visit_expr_literal(lit),
+            ExprTy::Literal { lit } => {
+                let lit = crate::span::Spanned::new(lit.clone(), self.span);
+                visit.visit_expr_literal(Spanned::as_ref(&lit))
+            }
 
             ExprTy::Logical { lhs, op, rhs } => visit.visit_expr_logical(
                 Spanned::as_ref(lhs),
@@ -279,7 +292,7 @@ impl<'a, T> Accept<T> for crate::visit::Spanned<'a, StmtTy> {
                 block,
             } => {
                 let params: Vec<_> = params.iter().map(Spanned::as_ref).collect();
-                let block: Vec<_> = block.iter().map(Spanned::as_ref).collect();
+                let block: Vec<_> = block.item.iter().map(Spanned::as_ref).collect();
                 visit.visit_stmt_function(Spanned::as_ref(ident), &params, &block)
             }
 

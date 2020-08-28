@@ -10,9 +10,6 @@ pub struct Lexer<'a> {
 
     previous: Pos,
     current: Pos,
-
-    pos: usize,
-    prev: usize,
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -31,10 +28,8 @@ impl<'a> Lexer<'a> {
         Lexer {
             source,
             iter: source.chars().peekable(),
-            previous: Pos::new(1, 0),
-            current: Pos::new(1, 0),
-            pos: 0,
-            prev: 0,
+            previous: Pos::new(1, 0, 0),
+            current: Pos::new(1, 0, 0),
         }
     }
 
@@ -42,7 +37,6 @@ impl<'a> Lexer<'a> {
         use Token::*;
         self.consume_while(char::is_whitespace);
         self.previous = self.current;
-        self.prev = self.pos;
 
         let next = match self.consume() {
             Some(ch) => ch,
@@ -102,7 +96,7 @@ impl<'a> Lexer<'a> {
 
         self.consume_while(Self::is_alpha);
 
-        let word = &self.source[self.prev..self.pos];
+        let word = &self.source[self.previous.abs as usize..self.current.abs as usize];
         match KEYWORDS.iter().find(|&&(k, _)| k == word).map(|&(_, v)| v) {
             Some(val) => self.emit(val),
             None => self.emit(Identifier),
@@ -135,9 +129,8 @@ impl<'a> Lexer<'a> {
     }
 
     fn emit(&mut self, item: Token) -> Spanned<Token> {
-        let pos = std::mem::replace(&mut self.prev, self.pos);
         let start = std::mem::replace(&mut self.previous, self.current);
-        Spanned::new(item, Span::new(start, self.current, pos as _))
+        Spanned::new(item, Span::new(start, self.current))
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -153,7 +146,7 @@ impl<'a> Lexer<'a> {
             }
             _ => self.current.col += 1,
         };
-        self.pos += 1;
+        self.current.abs += 1;
         Some(ch)
     }
 

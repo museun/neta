@@ -1,10 +1,10 @@
 use crate::logger::Logger;
 
-// macro_rules! pos {
-//     () => {
-//         concat!(file!(), ":", line!(), ":", column!())
-//     };
-// }
+macro_rules! pos {
+    () => {
+        concat!(file!(), ":", line!(), ":", column!())
+    };
+}
 
 use crate::{
     ast::*,
@@ -63,7 +63,7 @@ impl From<std::num::ParseFloatError> for ErrorKind {
 
 type ParseResult<T> = std::result::Result<T, Error>;
 
-pub fn parse(source: &str) -> (Program, Vec<diag::Diagnostic>) {
+pub fn parse(source: &str) -> (Spanned<Program>, Vec<diag::Diagnostic>) {
     let mut parser = Parser::new(source);
     (parser.program(), parser.errors)
 }
@@ -119,8 +119,7 @@ impl<'a> Parser<'a> {
         &self.source[self.current]
     }
 
-    fn error<T>(&self, kind: ErrorKind) -> ParseResult<T> {
-        let _t = Logger::enter(format!("error: {:?}", kind));
+    const fn error<T>(&self, kind: ErrorKind) -> ParseResult<T> {
         Err(Error {
             span: self.current.span,
             token: self.current.item,
@@ -150,6 +149,10 @@ impl<'a> Parser<'a> {
         func(self).map(|item| Spanned::new(item, span + self.current.span))
     }
 
+    fn manual_span<T>(&self, item: T, start: Span) -> Spanned<T> {
+        Spanned::new(item, start + self.current.span)
+    }
+
     fn contains(&self, tokens: &[Token]) -> bool {
         for &token in tokens {
             if self.current() == token {
@@ -158,108 +161,31 @@ impl<'a> Parser<'a> {
         }
         false
     }
-
-    fn once<F, T, E>(&mut self, func: F, msg: &str) -> Result<T, E>
-    where
-        F: Fn(&mut Self) -> Result<T, E>,
-    {
-        func(self).map_err(|err| {
-            self.errors.push(diag!(self.current.span, "{}", msg));
-            err
-        })
-    }
-
-    fn surround<F, T>(&mut self, left: Token, func: F, right: Token) -> ParseResult<T>
-    where
-        F: Fn(&mut Self) -> ParseResult<T>,
-    {
-        self.expect(left)?;
-        let out = func(self)?;
-        self.expect(right)?;
-        Ok(out)
-    }
-
-    fn surround_spanned<F, T>(
-        &mut self,
-        left: Token,
-        func: F,
-        right: Token,
-    ) -> ParseResult<Spanned<T>>
-    where
-        F: Fn(&mut Self) -> ParseResult<T>,
-    {
-        self.spanned(|this| {
-            this.expect(left)?;
-            let out = func(this)?;
-            this.expect(right)?;
-            Ok(out)
-        })
-    }
-
-    fn question<F, T, E>(&mut self, delimited: Token, func: F) -> Result<Option<T>, E>
-    where
-        F: Fn(&mut Self) -> Result<T, E>,
-    {
-        let ok = if self.maybe_bump(delimited) {
-            func(self).map(Some)?
-        } else {
-            None
-        };
-        Ok(ok)
-    }
-
-    fn star<F, D, T>(&mut self, func: F, delimited: D) -> Vec<T>
-    where
-        F: Fn(&mut Self) -> Result<T, Error>,
-
-        D: Into<Option<Token>>,
-    {
-        let delimited = delimited.into();
-        let mut out = vec![];
-
-        // TODO log this, but ignore the final 'unexpected eof'
-        while let Ok(p) = func(self) {
-            out.push(p);
-            if let Some(tok) = delimited {
-                if !self.maybe_bump(tok) {
-                    break;
-                }
-            }
-        }
-        out
-    }
-
-    fn delimited<T, F>(&mut self, func: F, delimited: Token) -> ParseResult<Vec<T>>
-    where
-        F: Fn(&mut Self) -> ParseResult<T>,
-    {
-        let mut out = vec![func(self)?];
-        if !self.maybe_bump(delimited) {
-            return Ok(out);
-        }
-        while let Ok(p) = func(self) {
-            out.push(p);
-            if !self.maybe_bump(delimited) {
-                break;
-            }
-        }
-        Ok(out)
-    }
 }
 
 impl<'a> Parser<'a> {
-    fn program(&mut self) -> Program {
-        let _t = Logger::enter("program");
-        let stmts = self.star(Self::declaration, None);
-        Program { stmts }
+    // program        → declaration* EOF ;
+    fn program(&mut self) -> Spanned<Program> {
+        let _t = Logger::enter(format!("program: {:?}", self.current.span));
+        let mut stmts = vec![];
+        self.spanned(|this| {
+            while !this.maybe_bump(Token::Eof) {
+                match this.spanned(Self::declaration) {
+                    Ok(decl) => stmts.push(decl),
+                    Err(err) => this.errors.push(err.into_diag()),
+                };
+            }
+            Ok(Program { stmts })
+        })
+        .unwrap()
     }
 
-    fn declaration(&mut self) -> ParseResult<Stmt> {
-        // declaration    → classDecl
-        //                | funDecl
-        //                | varDecl
-        //                | statement ;
-        let _t = Logger::enter("declaration");
+    // declaration    → classDecl
+    //                | funDecl
+    //                | varDecl
+    //                | statement ;
+    fn declaration(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("declaration: {:?}", self.current.span));
         match self.current() {
             Token::Class => self.class_decl(),
             Token::Fun => self.fun_decl(),
@@ -268,216 +194,233 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn class_decl(&mut self) -> ParseResult<Stmt> {
-        // classDecl      → "class" IDENTIFIER ( "<" IDENTIFIER )?
-        //                  "{" function* "}" ;
-        let _t = Logger::enter("class_decl");
+    // classDecl      → "class" IDENTIFIER ( "<" IDENTIFIER )?
+    //                  "{" function* "}" ;
+    fn class_decl(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("class_decl: {:?}", self.current.span));
+        self.expect(Token::Class)?;
+        let ident = self.identifier()?;
 
-        self.spanned(|this| {
-            this.expect(Token::Class)?;
-            let ident = this.identifier()?;
+        let super_ = if self.maybe_bump(Token::Less) {
+            Some(self.identifier()?)
+        } else {
+            None
+        };
 
-            let super_ = this.question(Token::Less, Self::identifier)?;
-            this.expect(Token::LeftBrace)?;
+        self.expect(Token::LeftBrace)?;
+        let mut functions = vec![];
+        while !self.maybe_bump(Token::RightBrace) {
+            functions.push(self.spanned(Self::function)?)
+        }
 
-            let functions = this.delimited(Self::function, Token::RightParen)?;
-
-            let stmt = StmtTy::Class {
-                ident,
-                super_,
-                functions,
-            };
-            Ok(stmt)
+        Ok(StmtTy::Class {
+            ident,
+            super_,
+            functions,
         })
     }
 
-    fn fun_decl(&mut self) -> ParseResult<Stmt> {
-        // funDecl        → "fun" function ;
-        let _t = Logger::enter("fun_decl");
+    // funDecl        → "fun" function ;
+    fn fun_decl(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("fun_decl: {:?}", self.current.span));
         self.expect(Token::Fun)?;
         self.function()
     }
 
-    fn function(&mut self) -> ParseResult<Stmt> {
-        // function       → IDENTIFIER "(" parameters? ")" block ;
-        let _t = Logger::enter("function");
+    // function       → IDENTIFIER "(" parameters? ")" block ;
+    fn function(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("function: {:?}", self.current.span));
+        let ident = self.identifier()?;
 
-        self.spanned(|this| {
-            use Token::*;
-            let stmt = StmtTy::Function {
-                ident: this.identifier()?,
-                params: this.surround(LeftParen, Self::parameters, RightParen)?,
-                block: this.block()?,
-            };
-            Ok(stmt)
+        self.expect(Token::LeftParen)?;
+        let mut params = vec![self.identifier()?];
+        while !self.maybe_bump(Token::Comma) {
+            params.push(self.identifier()?)
+        }
+        self.expect(Token::RightParen)?;
+
+        let block = self.spanned(Self::block)?;
+
+        Ok(StmtTy::Function {
+            ident,
+            params,
+            block,
         })
     }
 
-    fn var_decl(&mut self) -> ParseResult<Stmt> {
-        // varDecl        → "var" IDENTIFIER ( "=" expression )? ";" ;
-        let _t = Logger::enter("var_decl");
+    // varDecl        → "var" IDENTIFIER ( "=" expression )? ";" ;
+    fn var_decl(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("var_decl: {:?}", self.current.span));
+        self.expect(Token::Var)?;
+        let binding = self.identifier()?;
 
-        self.spanned(|this| {
-            this.expect(Token::Var)?;
-            let binding = this.identifier()?;
-            let init = this.question(Token::Equal, Self::expression)?;
-            this.expect(Token::Semicolon)?;
-            let stmt = StmtTy::Var { binding, init };
-            Ok(stmt)
-        })
+        let init = if self.maybe_bump(Token::Equal) {
+            Some(self.spanned(Self::expression)?)
+        } else {
+            None
+        };
+
+        self.expect(Token::Semicolon)?;
+        Ok(StmtTy::Var { binding, init })
     }
 
-    fn statement(&mut self) -> ParseResult<Stmt> {
-        // statement      → exprStmt
-        //                | forStmt
-        //                | ifStmt
-        //                | printStmt
-        //                | returnStmt
-        //                | whileStmt
-        //                | block ;
-        let _t = Logger::enter("statement");
-
+    // statement      → exprStmt
+    //                | forStmt
+    //                | ifStmt
+    //                | printStmt
+    //                | returnStmt
+    //                | whileStmt
+    //                | block ;
+    fn statement(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("statement: {:?}", self.current.span));
         match self.current() {
             Token::For => self.for_stmt(),
             Token::If => self.if_stmt(),
             Token::Print => self.print_stmt(),
             Token::Return => self.return_stmt(),
             Token::While => self.while_stmt(),
-            Token::LeftBrace => self.spanned(|this| {
-                let exprs = this.block()?;
+            Token::LeftBrace => {
+                let exprs = self.block()?;
+                for expr in &exprs {
+                    eprintln!("{} {:?}", pos!(), expr.span);
+                }
                 Ok(StmtTy::Block { exprs })
-            }),
+            }
             _ => self.expr_stmt(),
         }
     }
 
-    fn expr_stmt(&mut self) -> ParseResult<Stmt> {
-        // exprStmt       → expression ";" ;
-        let _t = Logger::enter("expr_stmt");
-        self.spanned(|this| {
-            let expr = this.expression()?;
-            this.expect(Token::Semicolon)?;
+    // exprStmt       → expression ";" ;
+    fn expr_stmt(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("expr_stmt: {:?}", self.current.span));
 
-            let expr = StmtTy::Expression { expr };
-            Ok(expr)
+        let start = self.current.span;
+        let expr = self.expression()?;
+        let expr = self.manual_span(expr, start);
+        eprintln!("{} {:#?}", pos!(), self.current);
+        self.expect(Token::Semicolon)?;
+        Ok(StmtTy::Expression { expr })
+    }
+
+    // forStmt        → "for" "(" ( varDecl | exprStmt | ";" )
+    //                            expression? ";"
+    //                            expression? ")" statement ;
+    fn for_stmt(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("for_stmt: {:?}", self.current.span));
+        self.expect(Token::For)?;
+        self.expect(Token::LeftParen)?;
+
+        let init = match self.current() {
+            Token::Semicolon => None,
+            Token::Var => Some(self.spanned(Self::var_decl)?),
+            _ => Some(self.spanned(Self::expr_stmt)?),
+        }
+        .map(Box::new);
+
+        let cond = match self.current() {
+            Token::Semicolon => None,
+            _ => Some(self.spanned(Self::expression)?),
+        };
+        self.expect(Token::Semicolon)?;
+
+        let loop_ = match self.current() {
+            Token::RightParen => None,
+            _ => Some(self.spanned(Self::expression)?),
+        };
+        self.expect(Token::RightParen)?;
+
+        let body = self.spanned(Self::statement).map(Box::new)?;
+
+        Ok(StmtTy::For {
+            init,
+            cond,
+            loop_,
+            body,
         })
     }
 
-    fn for_stmt(&mut self) -> ParseResult<Stmt> {
-        // forStmt        → "for" "(" ( varDecl | exprStmt | ";" )
-        //                            expression? ";"
-        //                            expression? ")" statement ;
-        let _t = Logger::enter("for_stmt");
+    // ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;
+    fn if_stmt(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("if_stmt: {:?}", self.current.span));
+        self.expect(Token::If)?;
+        let if_ = {
+            self.expect(Token::LeftParen)?;
+            let expr = self.spanned(Self::expression)?;
+            self.expect(Token::RightParen)?;
+            expr
+        };
 
-        self.spanned(|this| {
-            this.expect(Token::For)?;
-            this.expect(Token::LeftParen)?;
-
-            let init = match this.current() {
-                Token::Semicolon => None,
-                Token::Var => Some(this.var_decl()?),
-                _ => Some(this.expr_stmt()?),
-            }
-            .map(Box::new);
-
-            // TODO: this isn't doing the right thing
-            let cond = this.question(Token::Semicolon, Self::expression)?;
-            let loop_ = match this.question(Token::RightParen, Self::expression)? {
-                Some(expr) => Some(expr),
-                None => {
-                    this.expect(Token::RightParen)?;
-                    None
-                }
-            };
-
-            let body = this.statement().map(Box::new)?;
-
-            Ok(StmtTy::For {
-                init,
-                cond,
-                loop_,
-                body,
-            })
-        })
+        let body = self.spanned(Self::statement).map(Box::new)?;
+        let else_ = if self.maybe_bump(Token::Else) {
+            Some(Box::new(self.spanned(Self::statement)?))
+        } else {
+            None
+        };
+        Ok(StmtTy::Conditional { if_, body, else_ })
     }
 
-    fn if_stmt(&mut self) -> ParseResult<Stmt> {
-        // ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;
-        let _t = Logger::enter("if_stmt");
-
-        self.spanned(|this| {
-            this.expect(Token::If)?;
-            let if_ = this.surround(Token::LeftParen, Self::expression, Token::RightParen)?;
-            let body = this.statement().map(Box::new)?;
-            let else_ = this.question(Token::Else, Self::statement)?.map(Box::new);
-            Ok(StmtTy::Conditional { if_, body, else_ })
-        })
+    // printStmt      → "print" expression ";" ;
+    fn print_stmt(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("print_stmt: {:?}", self.current.span));
+        self.keyword_stmt(Token::Print)
+            .map(|expr| StmtTy::Print { expr })
     }
 
-    fn print_stmt(&mut self) -> ParseResult<Stmt> {
-        // printStmt      → "print" expression ";" ;
-        let _t = Logger::enter("print_stmt");
-
-        self.spanned(|this| {
-            this.expect(Token::Print)?;
-            let expr = this.expression()?;
-            this.expect(Token::Semicolon)?;
-            Ok(StmtTy::Print { expr })
-        })
+    // returnStmt     → "return" expression? ";" ;
+    fn return_stmt(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("return_stmt: {:?}", self.current.span));
+        self.keyword_stmt(Token::Return)
+            .map(|expr| StmtTy::Return { expr })
     }
 
-    fn return_stmt(&mut self) -> ParseResult<Stmt> {
-        // returnStmt     → "return" expression? ";" ;
-        let _t = Logger::enter("return_stmt");
-
-        self.spanned(|this| {
-            this.expect(Token::Return)?;
-            let expr = this.expression()?;
-            this.expect(Token::Semicolon)?;
-            Ok(StmtTy::Return { expr })
-        })
+    fn keyword_stmt(&mut self, keyword: Token) -> ParseResult<Expr> {
+        self.expect(keyword)?;
+        let expr = self.spanned(Self::expression)?;
+        self.expect(Token::Semicolon)?;
+        Ok(expr)
     }
 
-    fn while_stmt(&mut self) -> ParseResult<Stmt> {
-        // whileStmt      → "while" "(" expression ")" statement ;
-        let _t = Logger::enter("while_stmt");
-
-        self.spanned(|this| {
-            this.expect(Token::While)?;
-            let cond = this.surround(
-                Token::LeftParen, //
-                Self::expression,
-                Token::RightParen,
-            )?;
-            let stmt = this.statement().map(Box::new)?;
-            Ok(StmtTy::While { cond, stmt })
-        })
+    // whileStmt      → "while" "(" expression ")" statement ;
+    fn while_stmt(&mut self) -> ParseResult<StmtTy> {
+        let _t = Logger::enter(format!("while_stmt: {:?}", self.current.span));
+        self.expect(Token::While)?;
+        let cond = {
+            self.expect(Token::LeftParen)?;
+            let expr = self.spanned(Self::expression)?;
+            self.expect(Token::RightParen)?;
+            expr
+        };
+        let stmt = self.spanned(Self::statement).map(Box::new)?;
+        Ok(StmtTy::While { cond, stmt })
     }
 
+    // block          → "{" declaration* "}" ;
     fn block(&mut self) -> ParseResult<Vec<Stmt>> {
-        // block          → "{" declaration* "}" ;
-        let _t = Logger::enter("block");
+        let _t = Logger::enter(format!("block: {:?}", self.current.span));
+        let mut stmts = vec![];
         self.expect(Token::LeftBrace)?;
-        self.delimited(Self::declaration, Token::RightBrace)
+        while !self.maybe_bump(Token::RightBrace) {
+            let start = self.current.span;
+            let decl = self.declaration()?;
+            stmts.push(self.manual_span(decl, start))
+        }
+        Ok(stmts)
     }
 
-    fn expression(&mut self) -> ParseResult<Expr> {
-        // expression     → assignment ;
-        let _t = Logger::enter("expression");
+    // expression     → assignment ;
+    fn expression(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("expression: {:?}", self.current.span));
         self.assignment()
     }
-
-    fn assignment(&mut self) -> ParseResult<Expr> {
-        // assignment     → ( call "." )? IDENTIFIER "=" assignment
-        //                | logic_or ;
-        let _t = Logger::enter("assignment");
-
-        let span = self.current.span;
+    // assignment     → ( call "." )? IDENTIFIER "=" assignment
+    //                | logic_or ;
+    fn assignment(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("assignment: {:?}", self.current.span));
         let expr = self.logic_or()?;
 
         if self.maybe_bump(Token::Equal) {
-            let value = self.assignment()?;
-            let ty = match expr.item {
+            let value = self.spanned(Self::assignment)?;
+            let ty = match expr {
                 ExprTy::Get { obj, ident } => ExprTy::Set {
                     ident,
                     obj,
@@ -491,91 +434,86 @@ impl<'a> Parser<'a> {
 
                 _ => return self.error(ErrorKind::InvalidAssignment),
             };
-            return Ok(Expr::new(ty, span + self.current.span));
+
+            return Ok(ty);
         }
 
         Ok(expr)
     }
 
-    fn logic_or(&mut self) -> ParseResult<Expr> {
-        // logic_or       → logic_and ( "or" logic_and )* ;
-        let _t = Logger::enter("logic_or");
+    // logic_or       → logic_and ( "or" logic_and )* ;
+    fn logic_or(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("logic_or: {:?}", self.current.span));
         self.logical(Token::Or, LogicalOp::Or)
     }
 
-    fn logic_and(&mut self) -> ParseResult<Expr> {
-        // logic_and      → equality ( "and" equality )* ;
-        let _t = Logger::enter("logic_and");
+    // logic_and      → equality ( "and" equality )* ;
+    fn logic_and(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("logic_and: {:?}", self.current.span));
         self.logical(Token::And, LogicalOp::And)
     }
 
-    fn logical(&mut self, token: Token, op: LogicalOp) -> ParseResult<Expr> {
+    fn logical(&mut self, token: Token, op: LogicalOp) -> ParseResult<ExprTy> {
         let mut lhs = self.equality()?;
+        let start = self.current.span;
         while self.maybe_bump(token) {
-            let expr = ExprTy::Logical {
-                lhs: Box::new(lhs),
-                op: Spanned::new(op.clone(), self.current.span),
-                rhs: Box::new(self.equality()?),
-            };
-            lhs = Expr::new(expr, self.current.span)
+            // TODO these spans should be automatically created
+            lhs = ExprTy::Logical {
+                lhs: Box::new(self.manual_span(lhs, start)),
+                op: self.manual_span(op.clone(), start),
+                rhs: Box::new(self.spanned(Self::equality)?),
+            }
         }
         Ok(lhs)
     }
 
-    fn equality(&mut self) -> ParseResult<Expr> {
-        // equality       → comparison ( ( "!=" | "==" ) comparison )* ;
-        let _t = Logger::enter("equality");
+    // equality       → comparison ( ( "!=" | "==" ) comparison )* ;
+    fn equality(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("equality: {:?}", self.current.span));
         self.binary_op(Self::comparison, &[Token::BangEqual, Token::EqualEqual])
     }
 
-    fn comparison(&mut self) -> ParseResult<Expr> {
-        // comparison     → addition ( ( ">" | ">=" | "<" | "<=" ) addition )* ;
-        let _t = Logger::enter("comparison");
-        self.binary_op(
-            Self::addition,
-            &[
-                Token::Greater,
-                Token::GreaterEqual,
-                Token::Less,
-                Token::LessEqual,
-            ],
-        )
+    // comparison     → addition ( ( ">" | ">=" | "<" | "<=" ) addition )* ;
+    fn comparison(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("comparison: {:?}", self.current.span));
+        use Token::*;
+        self.binary_op(Self::addition, &[Greater, GreaterEqual, Less, LessEqual])
     }
 
-    fn addition(&mut self) -> ParseResult<Expr> {
-        // addition       → multiplication ( ( "-" | "+" ) multiplication )* ;
-        let _t = Logger::enter("addition");
+    // addition       → multiplication ( ( "-" | "+" ) multiplication )* ;
+    fn addition(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("addition: {:?}", self.current.span));
         self.binary_op(Self::multiplication, &[Token::Minus, Token::Plus])
     }
 
-    fn multiplication(&mut self) -> ParseResult<Expr> {
-        // multiplication → unary ( ( "/" | "*" ) unary )* ;
-        let _t = Logger::enter("multiplication");
+    // multiplication → unary ( ( "/" | "*" ) unary )* ;
+    fn multiplication(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("multiplication: {:?}", self.current.span));
         self.binary_op(Self::unary, &[Token::Slash, Token::Star])
     }
 
-    fn binary_op<F>(&mut self, next: F, tokens: &[Token]) -> ParseResult<Expr>
+    fn binary_op<F>(&mut self, mut next: F, tokens: &[Token]) -> ParseResult<ExprTy>
     where
-        F: Fn(&mut Self) -> ParseResult<Expr>,
+        F: Fn(&mut Self) -> ParseResult<ExprTy>,
     {
         let mut lhs = next(self)?;
         while self.contains(tokens) {
             let span = self.current.span;
-            let expr = ExprTy::Binary {
-                lhs: Box::new(lhs),
-                op: Spanned::new(BinaryOp::from_token(self.bump()), span),
-                rhs: Box::new(next(self)?),
-            };
-            lhs = Expr::new(expr, span)
-        }
+            // TODO these spans should be created automatically
 
+            let op = BinaryOp::from_token(self.bump());
+            lhs = ExprTy::Binary {
+                lhs: Box::new(self.manual_span(lhs, span)),
+                op: self.manual_span(op, span),
+                rhs: Box::new(self.spanned(&mut next)?),
+            }
+        }
         Ok(lhs)
     }
 
-    fn unary(&mut self) -> ParseResult<Expr> {
-        // unary          → ( "!" | "-" ) unary | call ;
-        let _t = Logger::enter("unary");
-
+    // unary          → ( "!" | "-" ) unary | call ;
+    fn unary(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("unary: {:?}", self.current.span));
         if self.contains(&[Token::Bang, Token::Minus]) {
             let span = self.current.span;
             let op = match self.bump() {
@@ -583,57 +521,49 @@ impl<'a> Parser<'a> {
                 Token::Minus => UnaryOp::Minus,
                 _ => unreachable!(),
             };
-
             let expr = ExprTy::Unary {
-                op: Spanned::new(op, span),
-                rhs: self.unary().map(Box::new)?,
+                op: self.manual_span(op, span),
+                rhs: self.spanned(Self::unary).map(Box::new)?,
             };
-            return Ok(Expr::new(expr, span));
+            return Ok(expr);
         }
 
         self.call()
     }
 
-    fn call(&mut self) -> ParseResult<Expr> {
-        // call           → primary ( "(" arguments? ")" | "." IDENTIFIER )* ;
-        let _t = Logger::enter("call");
-
+    // call           → primary ( "(" arguments? ")" | "." IDENTIFIER )* ;
+    fn call(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("call: {:?}", self.current.span));
+        let start = self.current.span;
         let mut expr = self.primary()?;
 
         while self.maybe_bump(Token::Dot) {
-            let obj = Box::new(expr);
-            expr = self.spanned(move |this| {
-                let ident = this.identifier()?;
-                Ok(ExprTy::Get { obj, ident })
-            })?;
+            let obj = Box::new(self.manual_span(expr, start));
+            let ident = self.identifier()?;
+            expr = ExprTy::Get { obj, ident };
         }
 
         if self.maybe_bump(Token::LeftParen) {
-            let obj = Box::new(expr);
-            expr = self.spanned(move |this| {
-                let mut args = vec![];
-                while !this.contains(&[Token::RightParen]) {
-                    args.push(this.expression()?);
-                    if !this.maybe_bump(Token::Comma) {
-                        break;
-                    }
+            let obj = Box::new(self.manual_span(expr, start));
+            let mut args = vec![];
+            while !self.contains(&[Token::RightParen]) {
+                args.push(self.spanned(Self::expression)?);
+                if !self.maybe_bump(Token::Comma) {
+                    break;
                 }
-                this.expect(Token::RightParen)?;
-                Ok(ExprTy::Call { expr: obj, args })
-            })?;
+            }
+            self.expect(Token::RightParen)?;
+            expr = ExprTy::Call { expr: obj, args };
         }
 
         Ok(expr)
     }
-
-    fn primary(&mut self) -> ParseResult<Expr> {
-        // primary        → "true" | "false" | "nil" | "this"
-        //                | NUMBER | STRING | IDENTIFIER | "(" expression ")"
-        //                | "super" "." IDENTIFIER ;
+    // primary        → "true" | "false" | "nil" | "this"
+    //                | NUMBER | STRING | IDENTIFIER | "(" expression ")"
+    //                | "super" "." IDENTIFIER ;
+    fn primary(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("primary: {:?}", self.current.span));
         use Token::*;
-
-        let _t = Logger::enter("primary");
-
         match self.current() {
             True | False | Nil | This | Number | String => self.literal(),
             Identifier => self.variable(),
@@ -643,35 +573,21 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parameters(&mut self) -> ParseResult<Vec<Identifier>> {
-        let _t = Logger::enter("parameters");
-        self.delimited(Self::identifier, Token::Comma)
+    fn super_(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("super_: {:?}", self.current.span));
+        self.expect(Token::Super)?;
+        self.expect(Token::Dot)?;
+        let ident = self.identifier()?;
+        Ok(ExprTy::Super { ident })
     }
 
-    fn arguments(&mut self) -> ParseResult<Vec<Expr>> {
-        let _t = Logger::enter("arguments");
-        self.delimited(Self::expression, Token::Comma)
-    }
-
-    fn super_(&mut self) -> ParseResult<Expr> {
-        let _t = Logger::enter("super_");
-        self.spanned(|this| {
-            this.expect(Token::Super)?;
-            this.expect(Token::Dot)?;
-            let ident = this.identifier()?;
-            Ok(ExprTy::Super { ident })
-        })
-    }
-
-    fn variable(&mut self) -> ParseResult<Expr> {
-        let _t = Logger::enter("variable");
-
-        let t = self.identifier()?;
-        Ok(t.map(|ident| ExprTy::Variable { ident }))
+    fn variable(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("variable: {:?}", self.current.span));
+        self.identifier().map(|ident| ExprTy::Variable { ident })
     }
 
     fn identifier(&mut self) -> ParseResult<Identifier> {
-        let _t = Logger::enter("identifier");
+        let _t = Logger::enter(format!("identifier: {:?}", self.current.span));
         if self.current() != Token::Identifier {
             return self.error(ErrorKind::ExpectedIdentifier);
         }
@@ -681,41 +597,32 @@ impl<'a> Parser<'a> {
         Ok(Spanned::new(Symbol::new(&self.source[span]), span))
     }
 
-    fn grouping(&mut self) -> ParseResult<Expr> {
-        let _t = Logger::enter("grouping");
-
-        self.spanned(|this| {
-            let expr = this
-                .surround(
-                    Token::LeftParen, //
-                    Self::expression,
-                    Token::RightParen,
-                )
-                .map(Box::new)?;
-            Ok(ExprTy::Grouping { expr })
-        })
+    fn grouping(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("grouping: {:?}", self.current.span));
+        self.expect(Token::LeftParen)?;
+        let expr = self.spanned(Self::expression).map(Box::new)?;
+        self.expect(Token::RightParen)?;
+        Ok(ExprTy::Grouping { expr })
     }
 
-    fn literal(&mut self) -> ParseResult<Expr> {
-        let _t = Logger::enter("literal");
-
-        self.spanned(|this| {
-            let lit = match this.current() {
-                Token::True => Literal::Bool(true),
-                Token::False => Literal::Bool(false),
-                Token::Nil => Literal::Nil,
-                Token::Number => this.number()?,
-                Token::String => this.string()?,
-                Token::This => Literal::This,
-                _ => unreachable!(),
-            };
-            this.bump();
-            Ok(ExprTy::Literal { lit })
-        })
+    fn literal(&mut self) -> ParseResult<ExprTy> {
+        let _t = Logger::enter(format!("literal: {:?}", self.current.span));
+        // this looks wrong
+        let lit = match self.current() {
+            Token::True => Literal::Bool(true),
+            Token::False => Literal::Bool(false),
+            Token::Nil => Literal::Nil,
+            Token::Number => self.number()?,
+            Token::String => self.string()?,
+            Token::This => Literal::This,
+            _ => unreachable!(),
+        };
+        self.bump();
+        Ok(ExprTy::Literal { lit })
     }
 
     fn string(&mut self) -> ParseResult<Literal> {
-        let _t = Logger::enter("string");
+        let _t = Logger::enter(format!("string: {:?}", self.current.span));
         // TODO be smarter about this
         let s = self.source();
         if s.starts_with('"') && s.ends_with('"') {
@@ -725,16 +632,15 @@ impl<'a> Parser<'a> {
     }
 
     fn number(&mut self) -> ParseResult<Literal> {
-        let _t = Logger::enter("number");
+        let _t = Logger::enter(format!("number: {:?}", self.current.span));
         match self.source().parse().map(Literal::Number) {
             Ok(ast) => Ok(ast),
             Err(err) => self.error(err.into()),
         }
     }
 
-    fn is_primary(&mut self) -> bool {
+    const fn is_primary(&self) -> bool {
         use Token::*;
-
         matches!(
             self.current(),
             True | False | Nil | This |    /* .. */
@@ -743,84 +649,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn is_identifier(&mut self) -> bool {
+    const fn is_identifier(&self) -> bool {
         matches!(self.current(), Token::Identifier)
-    }
-
-    // fn print_raw<T>(&self, pos: &str, spanned: &Spanned<T>) {
-    //     eprintln!(
-    //         "?? ({}) {:?} | '{}'",
-    //         pos,
-    //         spanned.span,
-    //         self.source[spanned.span].escape_debug()
-    //     )
-    // }
-}
-
-#[test]
-fn asdf() {
-    let source = r"
-var f = 21;
-var a = fib(f);
-print(a);
-    ";
-
-    let (program, errors) = parse(source);
-
-    if !errors.is_empty() {
-        for error in errors {
-            eprintln!("{}", error.render(source));
-        }
-    }
-
-    macro_rules! p {
-        ($span:expr) => {
-            eprintln!("> '{}'", source[$span].escape_debug())
-        };
-    }
-
-    if let Spanned {
-        item: StmtTy::Var { init, .. },
-        span,
-    } = &program.stmts[0]
-    {
-        p!(init.as_ref().unwrap().clone());
-        p!(span);
-    }
-
-    eprintln!("{}", crate::printer::Printer::new(source).print(program));
-}
-
-#[test]
-fn primary() {
-    let sources = &[
-        "true",
-        "false",
-        "nil",
-        "this",
-        "1234",
-        "\"hello world\"",
-        "foobar",
-        "super.foobar",
-        "(a)",
-        "(a.b.c)",
-        "(a.c(d))",
-    ];
-
-    for source in sources {
-        let mut parser = Parser::new(source);
-        let primary = parser.primary().unwrap();
-
-        if !parser.errors.is_empty() {
-            for error in parser.errors {
-                eprintln!("{}", error.render(source));
-            }
-        }
-
-        // eprintln!("{:#?}", primary);
-        eprintln!(
-            "{}",
-            crate::printer::Printer::new(source).print(Spanned::as_ref(&primary))
-        );
     }
 }

@@ -19,7 +19,7 @@ pub trait Visitor<T> {
 
     fn visit_expr_grouping(&mut self, expr: Spanned<ExprTy>) -> T;
 
-    fn visit_expr_literal(&mut self, lit: &Literal) -> T;
+    fn visit_expr_literal(&mut self, lit: Spanned<Literal>) -> T;
 
     fn visit_expr_logical(
         &mut self,
@@ -56,6 +56,7 @@ pub trait Visitor<T> {
         super_: Option<Spanned<Symbol>>,
         functions: &[Spanned<StmtTy>],
     ) -> T;
+
     fn visit_stmt_return(&mut self, expr: Spanned<ExprTy>) -> T;
 
     fn visit_stmt_function(
@@ -85,8 +86,13 @@ pub trait Visitor<T> {
 
 pub trait Accept<T> {
     fn accept(&self, visit: &mut dyn Visitor<T>) -> T;
+}
 
-    fn accept_many(&self, visit: &mut dyn Visitor<T>) -> Vec<T> {
-        vec![self.accept(visit)]
+impl<S, T> Accept<T> for &S
+where
+    S: Accept<T>,
+{
+    fn accept(&self, visit: &mut dyn Visitor<T>) -> T {
+        (*self).accept(visit)
     }
 }
