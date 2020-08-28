@@ -38,10 +38,10 @@ fn run_prompt() -> Result<()> {
     }
 }
 
-fn run(source: &str) -> Result<()> {
-    for token in neta::lexer::lex(source) {
-        println!("{:?}: '{}'", token, &source[token])
-    }
+fn run(_source: &str) -> Result<()> {
+    // for token in neta::lexer::lex(source) {
+    //     println!("{:?}: '{}'", token, &source[token])
+    // }
 
     Ok(())
 }

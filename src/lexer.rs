@@ -3,73 +3,83 @@ use std::{iter::Peekable, str::Chars};
 use crate::span::{Pos, Span, Spanned};
 use crate::token::Token;
 
-pub fn lex(source: &str) -> impl Iterator<Item = Spanned<Token>> + '_ {
-    let mut lexer = Lexer::new(source);
-    std::iter::from_fn(move || match lexer.lex() {
-        d if matches!(d.item, Token::Eof) => None,
-        d => Some(d),
-    })
+pub struct Lexer<'a> {
+    source: &'a str,
+
+    iter: Peekable<Chars<'a>>,
+
+    previous: Pos,
+    current: Pos,
+
+    pos: usize,
+    prev: usize,
 }
 
-struct Lexer<'a> {
-    source: &'a str,
-    iter: Peekable<Chars<'a>>,
-    current: Pos,
-    pos: usize,
+impl<'a> Iterator for Lexer<'a> {
+    type Item = Spanned<Token>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.lex() {
+            d if matches!(d.item, Token::Eof) => None,
+            d => Some(d),
+        }
+    }
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self {
+    pub fn new(source: &'a str) -> Self {
         Lexer {
             source,
             iter: source.chars().peekable(),
-            current: Pos { col: 0, line: 1 },
+            previous: Pos::new(1, 0),
+            current: Pos::new(1, 0),
             pos: 0,
+            prev: 0,
         }
     }
 
     fn lex(&mut self) -> Spanned<Token> {
         use Token::*;
         self.consume_while(char::is_whitespace);
+        self.previous = self.current;
+        self.prev = self.pos;
 
-        let start = self.current;
         let next = match self.consume() {
             Some(ch) => ch,
-            None => return self.emit(self.current, Eof),
+            None => return self.emit(Eof),
         };
 
-        match (next, self.peek()) {
-            ('/', Some('/')) => {
+        match next {
+            '(' => self.emit(LeftParen),
+            ')' => self.emit(RightParen),
+            '{' => self.emit(LeftBrace),
+            '}' => self.emit(RightBrace),
+            ',' => self.emit(Comma),
+            '.' => self.emit(Dot),
+            '-' => self.emit(Minus),
+            '+' => self.emit(Plus),
+            ';' => self.emit(Semicolon),
+            '*' => self.emit(Star),
+            '/' if self.peek() == Some('/') => {
                 self.consume_while(|c| c != '\n');
                 self.lex()
             }
+            '/' => self.emit(Slash),
 
-            ('(', ..) => self.emit(start, LeftParen),
-            (')', ..) => self.emit(start, RightParen),
-            ('{', ..) => self.emit(start, LeftBrace),
-            ('}', ..) => self.emit(start, RightBrace),
-            (',', ..) => self.emit(start, Comma),
-            ('.', ..) => self.emit(start, Dot),
-            ('-', ..) => self.emit(start, Minus),
-            ('+', ..) => self.emit(start, Plus),
-            (';', ..) => self.emit(start, Semicolon),
-            ('/', ..) => self.emit(start, Slash),
-            ('*', ..) => self.emit(start, Star),
+            '!' => self.emit_or('=', Bang, BangEqual),
+            '=' => self.emit_or('=', Equal, EqualEqual),
+            '>' => self.emit_or('=', Greater, GreaterEqual),
+            '<' => self.emit_or('=', Less, LessEqual),
 
-            ('!', Some('=')) => self.emit_or(start, Bang, BangEqual, |c| c == '='),
-            ('=', Some('=')) => self.emit_or(start, Equal, EqualEqual, |c| c == '='),
-            ('>', Some('=')) => self.emit_or(start, Greater, GreaterEqual, |c| c == '='),
-            ('<', Some('=')) => self.emit_or(start, Less, LessEqual, |c| c == '='),
+            ch if Self::is_alpha(ch) => self.lex_keyword(),
+            ch if Self::is_digit(ch) => self.lex_number(),
+            '"' => self.lex_string(),
 
-            (ch, ..) if Self::is_alpha(ch) => self.lex_keyword(start),
-            (ch, ..) if Self::is_digit(ch) => self.lex_number(start),
-            ('"', ..) => self.lex_string(start),
-
-            (ch, ..) => self.emit(start, Invalid(ch)),
+            ch => self.emit(Invalid(ch)),
         }
     }
 
-    fn lex_keyword(&mut self, start: Pos) -> Spanned<Token> {
+    fn lex_keyword(&mut self) -> Spanned<Token> {
         use Token::*;
         const KEYWORDS: &[(&str, Token)] = &[
             ("and", And),
@@ -92,52 +102,42 @@ impl<'a> Lexer<'a> {
 
         self.consume_while(Self::is_alpha);
 
-        let word = &self.source[start.col as _..self.current.col as _];
+        let word = &self.source[self.prev..self.pos];
         match KEYWORDS.iter().find(|&&(k, _)| k == word).map(|&(_, v)| v) {
-            Some(val) => self.emit(start, val),
-            None => self.emit(start, Identifier),
+            Some(val) => self.emit(val),
+            None => self.emit(Identifier),
         }
     }
 
-    fn lex_number(&mut self, start: Pos) -> Spanned<Token> {
+    fn lex_number(&mut self) -> Spanned<Token> {
         while let Some(p) = self.peek() {
             if !Self::is_digit(p) && p != '.' {
                 break;
             }
             self.consume();
         }
-        self.emit(start, Token::Number)
+        self.emit(Token::Number)
     }
 
-    fn lex_string(&mut self, start: Pos) -> Spanned<Token> {
+    fn lex_string(&mut self) -> Spanned<Token> {
         self.consume_while(|ch| ch != '"');
-        self.consume();
-        self.emit(start, Token::String)
+        assert!(self.consume() == Some('\"'));
+        self.emit(Token::String)
     }
 
-    fn emit_or(
-        &mut self,
-        start: Pos,
-        left: Token,
-        right: Token,
-        cmp: impl Fn(char) -> bool,
-    ) -> Spanned<Token> {
-        if cmp(self.peek().expect("not EOF")) {
+    fn emit_or(&mut self, cmp: char, left: Token, right: Token) -> Spanned<Token> {
+        if self.peek().expect("not EOF") == cmp {
             self.consume();
-            self.emit(start, right)
+            self.emit(right)
         } else {
-            self.emit(start, left)
+            self.emit(left)
         }
     }
 
-    fn emit(&mut self, start: Pos, item: Token) -> Spanned<Token> {
-        Spanned {
-            item,
-            span: Span {
-                start,
-                end: self.current,
-            },
-        }
+    fn emit(&mut self, item: Token) -> Spanned<Token> {
+        let pos = std::mem::replace(&mut self.prev, self.pos);
+        let start = std::mem::replace(&mut self.previous, self.current);
+        Spanned::new(item, Span::new(start, self.current, pos as _))
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -171,11 +171,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn is_alpha(ch: char) -> bool {
+    const fn is_alpha(ch: char) -> bool {
         matches!(ch, 'a'..='z' | 'A'..='Z' | '_')
     }
 
-    fn is_digit(ch: char) -> bool {
+    const fn is_digit(ch: char) -> bool {
         matches!(ch, '0'..='9')
     }
 }
